@@ -29,11 +29,6 @@ COPY package.json package-lock.json ./
 # Install only production dependencies
 RUN npm ci --production --ignore-scripts
 
-# Set environment variable for the Exa API key
-ENV EXA_API_KEY=your-api-key-here
+EXPOSE 8081
 
-# Expose the port the app runs on
-EXPOSE 3000
-
-# Run the application
-ENTRYPOINT ["node", ".smithery/index.cjs"]
+ENTRYPOINT ["node", ".smithery/shttp/index.cjs"]
