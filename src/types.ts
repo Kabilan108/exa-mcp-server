@@ -1,14 +1,15 @@
 // Exa API Types
 export interface ExaSearchRequest {
   query: string;
-  type: 'auto' | 'fast';
-  category?: string;
+  type: 'auto' | 'fast' | 'deep' | 'deep-reasoning';
+  category?: 'company' | 'research paper' | 'news' | 'pdf' | 'github' | 'tweet' | 'personal site' | 'people' | 'financial report';
   includeDomains?: string[];
   excludeDomains?: string[];
   startPublishedDate?: string;
   endPublishedDate?: string;
   numResults?: number;
   additionalQueries?: string[];
+  outputSchema?: Record<string, unknown>;
   contents: {
     text?: {
       maxCharacters?: number;
@@ -71,6 +72,8 @@ export interface ExaSearchResult {
   author: string;
   text: string;
   summary?: string;
+  highlights?: string[];
+  highlightScores?: number[];
   image?: string;
   favicon?: string;
   score?: number;
@@ -81,7 +84,65 @@ export interface ExaSearchResponse {
   autopromptString?: string;
   resolvedSearchType: string;
   context?: string;
+  output?: {
+    content: string | Record<string, unknown>;
+    grounding?: Array<{
+      field: string;
+      citations: Array<{
+        url: string;
+        title: string;
+      }>;
+      confidence: string;
+    }>;
+  };
   results: ExaSearchResult[];
+  searchTime?: number;
+  costDollars?: {
+    total: number;
+    search?: Record<string, number>;
+    contents?: Record<string, number>;
+  };
+}
+
+// Deep Search API Types
+export interface ExaDeepSearchRequest {
+  query: string;
+  type: 'deep' | 'deep-reasoning';
+  numResults?: number;
+  additionalQueries?: string[];
+  outputSchema?: Record<string, unknown>;
+  contents: {
+    highlights?: {
+      maxCharacters?: number;
+      numSentences?: number;
+      highlightsPerUrl?: number;
+      query?: string;
+    };
+  };
+}
+
+export interface ExaDeepSearchResponse {
+  requestId: string;
+  autopromptString?: string;
+  resolvedSearchType: string;
+  output?: {
+    content: string | Record<string, unknown>;
+    grounding?: Array<{
+      field: string;
+      citations: Array<{
+        url: string;
+        title: string;
+      }>;
+      confidence: string;
+    }>;
+  };
+  results: ExaSearchResult[];
+  searchTime?: number;
+  costDollars?: {
+    total: number;
+    search?: Record<string, number>;
+    contents?: Record<string, number>;
+  };
 }
 
 // Deep Research API Types (v1)
