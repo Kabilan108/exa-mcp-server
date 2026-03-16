@@ -84,6 +84,7 @@ jobs:
         uses: anthropics/claude-code-action@v1
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          github_token: ${{ secrets.GH_PAT }}
           prompt: |
             You are reviewing upstream changes from exa-labs/exa-mcp-server before
             they are merged into a private fork.
