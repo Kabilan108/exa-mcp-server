@@ -19,7 +19,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          token: ${{ secrets.GITHUB_TOKEN }}
+          token: ${{ secrets.GH_PAT }}
 
       - name: Configure upstream remote
         run: |
@@ -84,7 +84,6 @@ jobs:
         uses: anthropics/claude-code-action@v1
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
-          model: claude-sonnet-4-5-20250929
           prompt: |
             You are reviewing upstream changes from exa-labs/exa-mcp-server before
             they are merged into a private fork.
@@ -138,7 +137,7 @@ jobs:
 
             Be conservative: when in doubt, mark as risky. Empty arrays are fine
             when no issues are found in a category.
-          claude_args: '--allowedTools "Read,Write,Bash(cat:*),Bash(wc:*),Bash(head:*),Bash(tail:*),Bash(grep:*),Bash(npm audit:*)"'
+          claude_args: '--model claude-sonnet-4-5-20250929 --allowedTools "Read,Write,Bash(cat:*),Bash(wc:*),Bash(head:*),Bash(tail:*),Bash(grep:*),Bash(npm audit:*)"'
 
       - name: Parse assessment
         if: steps.check-changes.outputs.has_changes == 'true'
@@ -233,7 +232,7 @@ jobs:
             --body "${{ steps.assessment.outputs.report }}")
           echo "pr_url=$PR_URL" >> "$GITHUB_OUTPUT"
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GH_PAT }}
 
       # --- Notifications ---
 
