@@ -244,45 +244,38 @@ jobs:
           GH_TOKEN: ${{ secrets.GH_PAT }}
           REPORT: ${{ steps.assessment.outputs.report }}
           COMMIT_COUNT: ${{ steps.check-changes.outputs.commit_count }}
-          DIFF_STAT: ${{ steps.diff.outputs.diff_stat }}
           COMMIT_LOG: ${{ steps.diff.outputs.commit_log }}
+          VERDICT: ${{ steps.assessment.outputs.verdict }}
+          BRANCH: ${{ steps.merge.outputs.branch }}
         run: |
-          BODY=$(cat <<'PRBODY'
-          ${{ steps.assessment.outputs.report }}
+          {
+            echo "$REPORT"
+            echo ""
+            echo "## Upstream Changes"
+            echo ""
+            echo "**Commits:** $COMMIT_COUNT"
+            echo ""
+            echo "<details><summary>Commit log</summary>"
+            echo ""
+            echo '```'
+            echo "$COMMIT_LOG"
+            echo '```'
+            echo ""
+            echo "</details>"
+          } > /tmp/pr-body.md
 
-          ## Upstream Changes
-
-          **Commits:** ${{ steps.check-changes.outputs.commit_count }}
-
-          <details><summary>Commit log</summary>
-
-          ```
-          ${{ steps.diff.outputs.commit_log }}
-          ```
-
-          </details>
-          PRBODY
-          )
-
-          VERDICT="${{ steps.assessment.outputs.verdict }}"
+          TITLE="chore: sync with upstream exa-labs/exa-mcp-server"
           if [ "$VERDICT" = "risky" ]; then
-            TITLE="⚠️ chore: sync with upstream exa-labs/exa-mcp-server"
-            gh pr create \
-              --base main \
-              --head "${{ steps.merge.outputs.branch }}" \
-              --title "$TITLE" \
-              --body "$BODY" \
-              --label "risky"
-          else
-            TITLE="chore: sync with upstream exa-labs/exa-mcp-server"
-            gh pr create \
-              --base main \
-              --head "${{ steps.merge.outputs.branch }}" \
-              --title "$TITLE" \
-              --body "$BODY"
+            TITLE="⚠️ $TITLE"
           fi
 
-          PR_URL=$(gh pr view "${{ steps.merge.outputs.branch }}" --json url -q .url)
+          gh pr create \
+            --base main \
+            --head "$BRANCH" \
+            --title "$TITLE" \
+            --body-file /tmp/pr-body.md
+
+          PR_URL=$(gh pr view "$BRANCH" --json url -q .url)
           echo "pr_url=$PR_URL" >> "$GITHUB_OUTPUT"
 
       # --- Notifications ---
