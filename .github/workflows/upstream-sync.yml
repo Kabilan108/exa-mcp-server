@@ -146,7 +146,13 @@ jobs:
           if [ ! -f /tmp/verdict.json ]; then
             echo "verdict=error" >> "$GITHUB_OUTPUT"
             echo "summary=Claude did not produce a verdict file" >> "$GITHUB_OUTPUT"
-            echo "report=Claude security assessment failed to produce output." >> "$GITHUB_OUTPUT"
+            {
+              echo "report<<EOF"
+              echo "## Security Assessment"
+              echo ""
+              echo "> **Warning:** Claude did not produce a verdict file. Review these changes manually."
+              echo "EOF"
+            } >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
@@ -163,12 +169,17 @@ jobs:
           echo "confidence=$CONFIDENCE" >> "$GITHUB_OUTPUT"
           echo "summary=$SUMMARY" >> "$GITHUB_OUTPUT"
 
+          if [ "$VERDICT" = "risky" ]; then
+            EMOJI="🚨"
+          else
+            EMOJI="✅"
+          fi
+
           {
             echo "report<<EOF"
-            echo "## Upstream Sync Security Assessment"
+            echo "## Security Assessment"
             echo ""
-            echo "**Verdict:** $VERDICT (confidence: $CONFIDENCE)"
-            echo "**Commits:** ${{ steps.check-changes.outputs.commit_count }}"
+            echo "$EMOJI **Verdict:** $VERDICT (confidence: $CONFIDENCE)"
             echo ""
             echo "### Summary"
             echo "$SUMMARY"
@@ -191,15 +202,19 @@ jobs:
             echo "### Recommendation"
             echo "$RECOMMENDATION"
             echo ""
-            echo "### Diff Summary"
+            echo "---"
+            echo ""
+            echo "<details><summary>Diff summary</summary>"
+            echo ""
             echo '```'
             echo "${{ steps.diff.outputs.diff_stat }}"
             echo '```'
+            echo "</details>"
             echo "EOF"
           } >> "$GITHUB_OUTPUT"
 
       - name: Attempt merge
-        if: steps.check-changes.outputs.has_changes == 'true' && steps.assessment.outputs.verdict == 'safe'
+        if: steps.check-changes.outputs.has_changes == 'true'
         id: merge
         run: |
           UPSTREAM_SHORT=$(git rev-parse --short upstream/main)
@@ -224,15 +239,50 @@ jobs:
       - name: Create sync PR
         if: steps.merge.outputs.merge_success == 'true'
         id: create-pr
-        run: |
-          PR_URL=$(gh pr create \
-            --base main \
-            --head "${{ steps.merge.outputs.branch }}" \
-            --title "chore: sync with upstream exa-labs/exa-mcp-server" \
-            --body "${{ steps.assessment.outputs.report }}")
-          echo "pr_url=$PR_URL" >> "$GITHUB_OUTPUT"
         env:
           GH_TOKEN: ${{ secrets.GH_PAT }}
+          REPORT: ${{ steps.assessment.outputs.report }}
+          COMMIT_COUNT: ${{ steps.check-changes.outputs.commit_count }}
+          DIFF_STAT: ${{ steps.diff.outputs.diff_stat }}
+          COMMIT_LOG: ${{ steps.diff.outputs.commit_log }}
+        run: |
+          BODY=$(cat <<'PRBODY'
+          ${{ steps.assessment.outputs.report }}
+
+          ## Upstream Changes
+
+          **Commits:** ${{ steps.check-changes.outputs.commit_count }}
+
+          <details><summary>Commit log</summary>
+
+          ```
+          ${{ steps.diff.outputs.commit_log }}
+          ```
+
+          </details>
+          PRBODY
+          )
+
+          VERDICT="${{ steps.assessment.outputs.verdict }}"
+          if [ "$VERDICT" = "risky" ]; then
+            TITLE="⚠️ chore: sync with upstream exa-labs/exa-mcp-server"
+            gh pr create \
+              --base main \
+              --head "${{ steps.merge.outputs.branch }}" \
+              --title "$TITLE" \
+              --body "$BODY" \
+              --label "risky"
+          else
+            TITLE="chore: sync with upstream exa-labs/exa-mcp-server"
+            gh pr create \
+              --base main \
+              --head "${{ steps.merge.outputs.branch }}" \
+              --title "$TITLE" \
+              --body "$BODY"
+          fi
+
+          PR_URL=$(gh pr view "${{ steps.merge.outputs.branch }}" --json url -q .url)
+          echo "pr_url=$PR_URL" >> "$GITHUB_OUTPUT"
 
       # --- Notifications ---
 
@@ -250,10 +300,11 @@ jobs:
         uses: kabilan108/actions/discord-notify@v1
         with:
           webhook-url: ${{ secrets.DISCORD_WEBHOOK }}
-          level: success
-          title: Upstream sync PR created
+          level: ${{ steps.assessment.outputs.verdict == 'risky' && 'warning' || 'success' }}
+          title: "Upstream sync PR created (${{ steps.assessment.outputs.verdict }})"
           description: |
-            ${{ steps.check-changes.outputs.commit_count }} commits assessed as safe (confidence: ${{ steps.assessment.outputs.confidence }}).
+            ${{ steps.check-changes.outputs.commit_count }} commits from upstream (verdict: ${{ steps.assessment.outputs.verdict }}, confidence: ${{ steps.assessment.outputs.confidence }}).
+            ${{ steps.assessment.outputs.summary }}
             PR: ${{ steps.create-pr.outputs.pr_url }}
 
       - name: Notify -- merge conflicts
@@ -264,28 +315,8 @@ jobs:
           level: warning
           title: Merge conflicts need manual resolution
           description: |
-            ${{ steps.check-changes.outputs.commit_count }} upstream commits assessed as safe, but merge conflicts prevent automatic PR.
+            ${{ steps.check-changes.outputs.commit_count }} upstream commits cannot be auto-merged.
             Conflicting files: ${{ steps.merge.outputs.conflicts }}
-
-      - name: Notify -- risky changes
-        if: steps.check-changes.outputs.has_changes == 'true' && steps.assessment.outputs.verdict == 'risky'
-        uses: kabilan108/actions/discord-notify@v1
-        with:
-          webhook-url: ${{ secrets.DISCORD_WEBHOOK }}
-          level: error
-          title: Upstream changes flagged as risky
-          description: |
-            ${{ steps.check-changes.outputs.commit_count }} upstream commits require manual review.
-            ${{ steps.assessment.outputs.summary }}
-
-      - name: Notify -- assessment error
-        if: steps.check-changes.outputs.has_changes == 'true' && steps.assessment.outputs.verdict == 'error'
-        uses: kabilan108/actions/discord-notify@v1
-        with:
-          webhook-url: ${{ secrets.DISCORD_WEBHOOK }}
-          level: error
-          title: Security assessment failed
-          description: Claude did not produce a verdict. Check the workflow run for details.
 
       - name: Notify -- workflow failure
         if: failure()
