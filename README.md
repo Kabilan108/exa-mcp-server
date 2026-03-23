@@ -3,7 +3,6 @@
 [![Install in Cursor](https://img.shields.io/badge/Install_in-Cursor-000000?style=flat-square&logoColor=white)](https://cursor.com/en/install-mcp?name=exa&config=eyJuYW1lIjoiZXhhIiwidHlwZSI6Imh0dHAiLCJ1cmwiOiJodHRwczovL21jcC5leGEuYWkvbWNwIn0=)
 [![Install in VS Code](https://img.shields.io/badge/Install_in-VS_Code-0098FF?style=flat-square&logo=visualstudiocode&logoColor=white)](https://vscode.dev/redirect/mcp/install?name=exa&config=%7B%22type%22%3A%22http%22%2C%22url%22%3A%22https%3A%2F%2Fmcp.exa.ai%2Fmcp%22%7D)
 [![npm version](https://badge.fury.io/js/exa-mcp-server.svg)](https://www.npmjs.com/package/exa-mcp-server)
-[![smithery badge](https://smithery.ai/badge/exa)](https://smithery.ai/server/exa)
 
 Connect AI assistants to Exa's search capabilities: web search, code search, and company research.
 
@@ -276,22 +275,17 @@ Use the npm package with your API key. [Get your API key](https://dashboard.exa.
 | ---- | ----------- |
 | `web_search_exa` | Search the web for any topic and get clean, ready-to-use content |
 | `get_code_context_exa` | Find code examples, documentation, and programming solutions from GitHub, Stack Overflow, and docs |
-| `company_research_exa` | Research any company to get business information, news, and insights |
 
 **Off by Default:**
 | Tool | Description |
 | ---- | ----------- |
 | `web_search_advanced_exa` | Advanced web search with full control over filters, domains, dates, and content options |
 | `crawling_exa` | Get the full content of a specific webpage from a known URL |
-| `people_search_exa` | Find people and their professional profiles |
-| `deep_researcher_start` | Start an AI research agent that searches, reads, and writes a detailed report |
-| `deep_researcher_check` | Check status and get results from a deep research task |
-| `deep_search_exa` | Deep search with query expansion and synthesized answers. Requires your own API key — it will not appear in the tools list without one. |
 
-Enable all tools with the `tools` parameter:
+Enable additional tools with the `tools` parameter:
 
 ```
-https://mcp.exa.ai/mcp?exaApiKey=YOUR_KEY&tools=web_search_exa,web_search_advanced_exa,get_code_context_exa,crawling_exa,company_research_exa,people_search_exa,deep_researcher_start,deep_researcher_check,deep_search_exa
+https://mcp.exa.ai/mcp?exaApiKey=YOUR_KEY&tools=web_search_exa,web_search_advanced_exa,get_code_context_exa,crawling_exa
 ```
 
 ## Agent Skills (Claude Skills)

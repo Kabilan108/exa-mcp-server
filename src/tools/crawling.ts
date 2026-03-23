@@ -4,6 +4,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { API_CONFIG } from "./config.js";
 import { createRequestLogger } from "../utils/logger.js";
 import { handleRateLimitError } from "../utils/errorHandler.js";
+import { sanitizeContentsResponse } from "../utils/exaResponseSanitizer.js";
 import { checkpoint } from "agnost";
 
 export function registerCrawlingTool(server: McpServer, config?: { exaApiKey?: string; userProvidedApiKey?: boolean }): void {
@@ -63,7 +64,7 @@ Returns: Full text content and metadata from the page.`,
         checkpoint('crawl_response_received');
         logger.log("Received response from Exa API");
 
-        if (!response.data || !response.data.results) {
+        if (!response.data || !response.data.results || response.data.results.length === 0) {
           logger.log("Warning: Empty or invalid response from Exa API");
           checkpoint('crawl_complete');
           return {
@@ -75,11 +76,11 @@ Returns: Full text content and metadata from the page.`,
         }
 
         logger.log(`Successfully crawled content from URL`);
-        
+
         const result = {
           content: [{
             type: "text" as const,
-            text: JSON.stringify(response.data, null, 2)
+            text: JSON.stringify(sanitizeContentsResponse(response.data), null, 2)
           }]
         };
         
@@ -121,4 +122,4 @@ Returns: Full text content and metadata from the page.`,
       }
     }
   );
-}                                                                                                
+}                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                
