@@ -4,6 +4,7 @@ import { createMcpHandler } from 'mcp-handler';
 import { initializeMcpServer } from '../src/mcp-handler.js';
 import { Ratelimit } from '@upstash/ratelimit';
 import { Redis } from '@upstash/redis';
+import { isJwtToken, verifyOAuthToken } from '../src/utils/auth.js';
 
 /**
  * IP-based rate limiting configuration for free MCP users.
@@ -83,7 +84,9 @@ function getClientIp(request: Request): string {
 
 const RATE_LIMIT_ERROR_MESSAGE = `You've hit Exa's free MCP rate limit. To continue using without limits, create your own Exa API key.
 
-Fix: Create API key at https://dashboard.exa.ai/api-keys , and then update Exa MCP URL to this https://mcp.exa.ai/mcp?exaApiKey=YOUR_EXA_API_KEY`;
+Fix: Create API key at https://dashboard.exa.ai/api-keys , then either:
+- Set the header: Authorization: Bearer YOUR_EXA_API_KEY
+- Or use the URL: https://mcp.exa.ai/mcp?exaApiKey=YOUR_EXA_API_KEY`;
 
 /**
  * Create a JSON-RPC 2.0 error response for rate limiting.
@@ -128,9 +131,13 @@ function isRateLimitedMethod(body: string): boolean {
   }
 }
 
+/** 7-day TTL for ~10-minute bypass tracking buckets. */
+const BYPASS_BUCKET_TTL_SECONDS = 7 * 24 * 60 * 60;
+
 /**
  * Save IP and user agent for bypass requests to Redis for tracking.
- * Uses a sorted set with timestamp as score for easy time-based queries.
+ * Uses ~15-min-bucketed sorted sets (e.g. exa-mcp:bypass:2026-03-24T14:00, exa-mcp:bypass:2026-03-24T14:15)
+ * to prevent unbounded growth that would hit Upstash's 100MB single-record limit.
  */
 async function saveBypassRequestInfo(ip: string, userAgent: string, debug: boolean): Promise<void> {
   initializeRateLimiters();
@@ -144,9 +151,17 @@ async function saveBypassRequestInfo(ip: string, userAgent: string, debug: boole
   
   try {
     const timestamp = Date.now();
+    const date = new Date(timestamp);
+    const minutes = date.getUTCMinutes();
+    const bucket = Math.floor(minutes / 15) * 15;
+    const bucketStr = `${date.toISOString().slice(0, 13)}:${String(bucket).padStart(2, '0')}`;
+    const bucketKey = `exa-mcp:bypass:${bucketStr}`;
     const entry = JSON.stringify({ ip, userAgent, timestamp });
     
-    await redisClient.zadd('exa-mcp:bypass-requests', { score: timestamp, member: entry });
+    await Promise.all([
+      redisClient.zadd(bucketKey, { score: timestamp, member: entry }),
+      redisClient.expire(bucketKey, BYPASS_BUCKET_TTL_SECONDS),
+    ]);
     
     if (debug) {
       console.log(`[EXA-MCP] Saved bypass request info for IP: ${ip}`);
@@ -200,9 +215,13 @@ async function checkRateLimits(ip: string, debug: boolean): Promise<Response | n
  * This handler is automatically deployed as a Vercel Function and provides
  * Streamable HTTP transport for the MCP protocol.
  * 
- * Supports URL query parameters (100% compatible with production mcp.exa.ai):
- * - ?exaApiKey=YOUR_KEY - Pass API key via URL
- * - ?tools=web_search_exa,get_code_context_exa - Enable specific tools
+ * Supports API key via header (recommended) or URL query parameter:
+ * - x-api-key: YOUR_KEY - Pass API key via header (recommended)
+ * - Authorization: Bearer YOUR_KEY - Pass API key via header (alternative)
+ * - ?exaApiKey=YOUR_KEY - Pass API key via URL (backwards compatible)
+ * 
+ * Other URL query parameters:
+ * - ?tools=web_search_exa,web_fetch_exa - Enable specific tools
  * - ?debug=true - Enable debug logging
  * 
  * Also supports environment variables:
@@ -210,7 +229,7 @@ async function checkRateLimits(ip: string, debug: boolean): Promise<Response | n
  * - DEBUG: Enable debug logging (true/false)
  * - ENABLED_TOOLS: Comma-separated list of tools to enable
  * 
- * URL query parameters take precedence over environment variables.
+ * Priority: x-api-key header > Authorization header > URL query parameter > environment variable.
  * 
  * ARCHITECTURE NOTE:
  * The mcp-handler library creates a single server instance and doesn't pass
@@ -222,30 +241,90 @@ async function checkRateLimits(ip: string, debug: boolean): Promise<Response | n
  * 3. Users can specify different tools and API keys per request
  */
 
+/** Extract bearer token from Authorization header. */
+function getBearerToken(request: Request): string | undefined {
+  const authHeader = request.headers.get('authorization');
+  if (authHeader) {
+    const match = authHeader.match(/^Bearer\s+(.+)$/i);
+    if (match && match[1]) {
+      return match[1];
+    }
+  }
+  return undefined;
+}
+
 /**
- * Extract configuration from request URL or environment variables
- * URL parameters take precedence over environment variables
+ * Extract configuration from request headers, URL, or environment variables.
+ * Priority: header > query parameter > environment variable.
  */
-function getConfigFromUrl(url: string) {
+
+interface RequestConfig {
+  exaApiKey?: string;
+  enabledTools?: string[];
+  debug: boolean;
+  userProvidedApiKey: boolean;
+  authMethod: 'oauth' | 'api_key' | 'free_tier';
+}
+
+/**
+ * Extract configuration from request headers, URL, or environment variables.
+ * Priority: x-api-key header > OAuth JWT > plain Bearer API key > query parameter > environment variable.
+ */
+async function getConfigFromRequest(request: Request): Promise<RequestConfig> {
   let exaApiKey = process.env.EXA_API_KEY;
   let enabledTools: string[] | undefined;
   let debug = process.env.DEBUG === 'true';
   let userProvidedApiKey = false;
+  let authMethod: 'oauth' | 'api_key' | 'free_tier' = 'free_tier';
+
+  // 1. Check x-api-key header (highest priority)
+  const xApiKey = request.headers.get('x-api-key');
+  if (xApiKey) {
+    exaApiKey = xApiKey;
+    userProvidedApiKey = true;
+    authMethod = 'api_key';
+  }
+
+  // 2. Check Authorization: Bearer header (fallback when no x-api-key)
+  if (!xApiKey) {
+    const bearerToken = getBearerToken(request);
+    if (bearerToken) {
+      // Distinguish JWT (OAuth) from plain API key
+      if (isJwtToken(bearerToken)) {
+        const claims = await verifyOAuthToken(bearerToken);
+        if (claims) {
+          // The api_key_id claim IS the API key (ApiKey.id UUID = the key string)
+          exaApiKey = claims['exa:api_key_id'];
+          userProvidedApiKey = true;
+          authMethod = 'oauth';
+        } else {
+          // JWT verification failed — don't fall through to treating it as an API key
+          console.error('[EXA-MCP] Invalid OAuth JWT token');
+        }
+      } else {
+        // Plain API key in Bearer header
+        exaApiKey = bearerToken;
+        userProvidedApiKey = true;
+        authMethod = 'api_key';
+      }
+    }
+  }
 
   try {
-    const parsedUrl = new URL(url);
+    const parsedUrl = new URL(request.url);
     const params = parsedUrl.searchParams;
 
-    // Support ?exaApiKey=YOUR_KEY (query param takes precedence)
-    if (params.has('exaApiKey')) {
+    // 3. Check ?exaApiKey=YOUR_KEY (fallback for backwards compat, only if no header)
+    if (!xApiKey && !getBearerToken(request) && params.has('exaApiKey')) {
       const keyFromUrl = params.get('exaApiKey');
       if (keyFromUrl) {
         exaApiKey = keyFromUrl;
         userProvidedApiKey = true;
+        authMethod = 'api_key';
       }
     }
 
-    // Support ?tools=tool1,tool2 (query param takes precedence)
+    // Support ?tools=tool1,tool2
     if (params.has('tools')) {
       const toolsParam = params.get('tools');
       if (toolsParam) {
@@ -275,7 +354,7 @@ function getConfigFromUrl(url: string) {
       .filter(t => t.length > 0);
   }
 
-  return { exaApiKey, enabledTools, debug, userProvidedApiKey };
+  return { exaApiKey, enabledTools, debug, userProvidedApiKey, authMethod };
 }
 
 /**
@@ -294,26 +373,71 @@ function createHandler(config: { exaApiKey?: string; enabledTools?: string[]; de
   );
 }
 
+function hasAuth(request: Request): boolean {
+  if (request.headers.get('x-api-key')) return true;
+  if (getBearerToken(request)) return true;
+  try {
+    const url = new URL(request.url);
+    if (url.searchParams.get('exaApiKey')) return true;
+  } catch {
+    // URL parsing failed — no auth
+  }
+  return false;
+}
+
+function create401Response(): Response {
+  return new Response(
+    JSON.stringify({
+      jsonrpc: '2.0',
+      error: {
+        code: -32000,
+        message: 'Authentication required. Use OAuth or provide an API key.',
+      },
+      id: null,
+    }),
+    {
+      status: 401,
+      headers: {
+        'WWW-Authenticate':
+          'Bearer resource_metadata="https://mcp.exa.ai/.well-known/oauth-protected-resource"',
+        'Content-Type': 'application/json',
+      },
+    },
+  );
+}
+
 /**
  * Main request handler that extracts config from URL and creates
  * a fresh handler for each request
  */
-async function handleRequest(request: Request): Promise<Response> {
-  // Extract configuration from the request URL
-  const config = getConfigFromUrl(request.url);
+async function handleRequest(request: Request, options?: { forceOAuth?: boolean }): Promise<Response> {
+  const debug = process.env.DEBUG === 'true';
+
+  // Check user-agent bypass BEFORE the 401 gate so bypass clients never see auth prompts
+  const userAgent = request.headers.get('user-agent') || '';
+  const bypassPrefix = process.env.RATE_LIMIT_BYPASS;
+  const bypassApiKey = process.env.EXA_API_KEY_BYPASS;
+  const bypassRateLimit = bypassPrefix && bypassApiKey && userAgent.startsWith(bypassPrefix);
+
+  // Check if user-agent matches OAUTH_USER_AGENTS (force OAuth on /mcp for these clients)
+  const oauthUserAgents = process.env.OAUTH_USER_AGENTS?.split(',').map(s => s.trim()).filter(Boolean) || [];
+  const userAgentMatchesOAuth = oauthUserAgents.some(ua => userAgent.includes(ua));
+
+  // Gate: require auth for /mcp/oauth endpoint OR matching user agents (unless bypassed)
+  const requireOAuth = options?.forceOAuth || userAgentMatchesOAuth;
+  if (!bypassRateLimit && requireOAuth && !hasAuth(request)) {
+    return create401Response();
+  }
+
+  // Extract configuration from request headers, URL, and env vars
+  const config = await getConfigFromRequest(request);
   
   if (config.debug) {
     console.log(`[EXA-MCP] Request URL: ${request.url}`);
     console.log(`[EXA-MCP] Enabled tools: ${config.enabledTools?.join(', ') || 'default'}`);
-    console.log(`[EXA-MCP] API key provided: ${config.userProvidedApiKey ? 'yes (user provided)' : 'no (using env var)'}`);
+    console.log(`[EXA-MCP] Auth method: ${config.authMethod}`);
+    console.log(`[EXA-MCP] API key provided: ${config.userProvidedApiKey ? 'yes' : 'no (using env var)'}`);
   }
-  
-  const userAgent = request.headers.get('user-agent') || '';
-  const bypassPrefix = process.env.RATE_LIMIT_BYPASS;
-  const bypassApiKey = process.env.EXA_API_KEY_BYPASS;
-  // Only allow bypass if BOTH prefix matches AND bypass API key is configured
-  // This ensures bypass users always use a dedicated key for tracking/billing
-  const bypassRateLimit = bypassPrefix && bypassApiKey && userAgent.startsWith(bypassPrefix);
   
   // Use separate API key for bypass users and save their IP/user-agent for tracking
   if (bypassRateLimit) {
@@ -355,7 +479,7 @@ async function handleRequest(request: Request): Promise<Response> {
   // Normalize URL pathname to /api/mcp for mcp-handler (it checks url.pathname)
   // This handles requests from /mcp and / rewrites
   const url = new URL(request.url);
-  if (url.pathname === '/mcp' || url.pathname === '/') {
+  if (url.pathname === '/mcp' || url.pathname === '/' || url.pathname === '/mcp/oauth' || url.pathname === '/mcp-oauth' || url.pathname === '/api/mcp-oauth') {
     url.pathname = '/api/mcp';
     request = new Request(url.toString(), request);
   }
@@ -366,4 +490,6 @@ async function handleRequest(request: Request): Promise<Response> {
 
 // Export handlers for Vercel Functions
 export { handleRequest as GET, handleRequest as POST, handleRequest as DELETE };
+
+export { handleRequest };
 

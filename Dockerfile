@@ -23,12 +23,14 @@ FROM node:18-alpine AS runner
 WORKDIR /app
 
 # Copy compiled code from the builder stage
-COPY --from=builder /app/.smithery ./.smithery
+COPY --from=builder /app/smithery ./smithery
 COPY package.json package-lock.json ./
 
 # Install only production dependencies
 RUN npm ci --production --ignore-scripts
 
-EXPOSE 8081
+# Expose the port the app runs on
+EXPOSE 3000
 
-ENTRYPOINT ["node", ".smithery/shttp/index.cjs"]
+# Run the application
+ENTRYPOINT ["node", "smithery/shttp/index.cjs"]
