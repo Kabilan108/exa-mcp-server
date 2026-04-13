@@ -1,6 +1,6 @@
 ---
 name: company-research
-description: Company research using Exa search. Finds company info, competitors, news, tweets, financials, LinkedIn profiles, builds company lists. Use when researching companies, doing competitor analysis, market research, or building company lists.
+description: Company research using Exa search. Finds company info, competitors, news, financials, LinkedIn profiles, builds company lists. Use when researching companies, doing competitor analysis, market research, or building company lists.
 context: fork
 ---
 
@@ -38,11 +38,10 @@ Exa returns different results for different phrasings. For coverage:
 Use appropriate Exa `category` depending on what you need:
 - `company` → homepages, rich metadata (headcount, location, funding, revenue)
 - `news` → press coverage, announcements
-- `tweet` → social presence, public commentary
 - `people` → LinkedIn profiles (public data)
 - No category (`type: "auto"`) → general web results, deep dives, broader context
 
-Start with `category: "company"` for discovery, then use other categories or no category with `livecrawl: "fallback"` for deeper research.
+Start with `category: "company"` for discovery, then use other categories or no category for deeper research.
 
 ### Category-Specific Filter Restrictions
 
@@ -84,7 +83,6 @@ web_search_advanced_exa {
 web_search_advanced_exa {
   "query": "Anthropic funding rounds valuation 2024",
   "type": "deep",
-  "livecrawl": "fallback",
   "numResults": 10,
   "includeDomains": ["techcrunch.com", "crunchbase.com", "bloomberg.com"]
 }
