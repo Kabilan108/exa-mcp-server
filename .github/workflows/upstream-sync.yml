@@ -79,12 +79,6 @@ jobs:
             echo "existing_pr_url=" >> "${GITHUB_OUTPUT}"
           fi
 
-      - name: Setup Node.js
-        if: steps.prepare.outputs.has_changes == 'true' && steps.prepare.outputs.has_existing_pr != 'true'
-        uses: actions/setup-node@v6
-        with:
-          node-version: lts/*
-
       - name: Prepare sync branch
         if: steps.prepare.outputs.has_changes == 'true' && steps.prepare.outputs.has_existing_pr != 'true'
         id: merge
@@ -104,8 +98,37 @@ jobs:
 
           echo "branch=${BRANCH}" >> "${GITHUB_OUTPUT}"
 
-      - name: Claude review and conflict resolution
-        if: steps.prepare.outputs.has_changes == 'true' && steps.prepare.outputs.has_existing_pr != 'true'
+      - name: Write deterministic sync report
+        if: steps.prepare.outputs.has_changes == 'true' && steps.prepare.outputs.has_existing_pr != 'true' && steps.merge.outputs.merge_state == 'clean'
+        run: |
+          {
+            echo "## Summary"
+            echo
+            echo "Merged upstream changes cleanly without agent intervention."
+            echo
+            echo "## Risks"
+            echo
+            echo "- No merge conflicts were detected."
+            echo "- Upstream changes still require normal PR review before merge."
+            echo
+            echo "## Testing"
+            echo
+            echo "- No repository-specific validation was run in the sync workflow."
+            echo
+            echo "## Notes"
+            echo
+            echo "- Sync branch: \`${{ steps.merge.outputs.branch }}\`"
+            echo "- Upstream commits: ${{ steps.prepare.outputs.commit_count }}"
+          } > /tmp/upstream-review.md
+
+      - name: Setup Node.js
+        if: steps.prepare.outputs.has_changes == 'true' && steps.prepare.outputs.has_existing_pr != 'true' && steps.merge.outputs.merge_state == 'conflicted'
+        uses: actions/setup-node@v6
+        with:
+          node-version: lts/*
+
+      - name: Claude conflict resolution
+        if: steps.prepare.outputs.has_changes == 'true' && steps.prepare.outputs.has_existing_pr != 'true' && steps.merge.outputs.merge_state == 'conflicted'
         uses: anthropics/claude-code-action@v1
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
@@ -115,14 +138,13 @@ jobs:
 
             The checked-out branch is `${{ steps.merge.outputs.branch }}`.
             It was created from `origin/${{ env.BASE_BRANCH }}` and then merged with `upstream/${{ env.UPSTREAM_BRANCH }}`.
-            Current merge state: `${{ steps.merge.outputs.merge_state }}`.
+            The merge has conflicts that must be resolved before a sync PR can be opened.
 
             Tasks:
-            1. Review the upstream changes for security, supply-chain, and stability concerns.
-            2. If the merge state is `conflicted`, resolve every git conflict and finish the merge with a commit.
-            3. Preserve fork-specific automation and workflow behavior unless upstream clearly supersedes it.
-            4. If you make follow-up code changes beyond the merge resolution, commit them.
-            5. Write a concise markdown report to `/tmp/upstream-review.md` with these sections:
+            1. Resolve every git conflict and finish the merge with a commit.
+            2. Preserve fork-specific automation and workflow behavior unless upstream clearly supersedes it.
+            3. If you make follow-up code changes beyond the merge resolution, commit them.
+            4. Write a concise markdown report to `/tmp/upstream-review.md` with these sections:
                - `## Summary`
                - `## Risks`
                - `## Testing`
@@ -140,9 +162,9 @@ jobs:
             - Changed files: `/tmp/upstream-changed-files.txt`
             - Diff stat: `/tmp/upstream-diff-stat.txt`
 
-            If validation is useful, prefer the lightest relevant commands for this TypeScript repository.
+            Keep the session focused on conflict resolution. If validation is useful, prefer the lightest relevant commands for this TypeScript repository.
           claude_args: |
-            --max-turns 20
+            --max-turns 30
             --model claude-sonnet-4-5-20250929
             --allowedTools "Read,Write,Edit,Bash(git:*),Bash(npm:*),Bash(npx tsc:*)"
 
