@@ -8,309 +8,256 @@ on:
 permissions:
   contents: write
   pull-requests: write
-  issues: write
   id-token: write
+
+concurrency:
+  group: upstream-sync
+  cancel-in-progress: false
+
+env:
+  UPSTREAM_REPO: exa-labs/exa-mcp-server
+  UPSTREAM_BRANCH: main
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+  BASE_BRANCH: ${{ github.event.repository.default_branch }}
 
 jobs:
   sync:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout fork
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           fetch-depth: 0
-          token: ${{ secrets.GH_PAT }}
+          token: ${{ github.token }}
 
-      - name: Configure upstream remote
+      - name: Inspect upstream state
+        id: prepare
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
         run: |
-          git remote add upstream https://github.com/exa-labs/exa-mcp-server.git || true
-          git fetch upstream main
+          set -euo pipefail
 
-      - name: Check for new upstream changes
-        id: check-changes
-        run: |
-          UPSTREAM_SHA=$(git rev-parse upstream/main)
-          FORK_MERGE_BASE=$(git merge-base HEAD upstream/main)
-          echo "upstream_sha=$UPSTREAM_SHA" >> "$GITHUB_OUTPUT"
-          echo "merge_base=$FORK_MERGE_BASE" >> "$GITHUB_OUTPUT"
+          git remote add upstream "https://github.com/${UPSTREAM_REPO}.git" 2>/dev/null || git remote set-url upstream "https://github.com/${UPSTREAM_REPO}.git"
+          git fetch --no-tags origin "${BASE_BRANCH}"
+          git fetch --no-tags upstream "${UPSTREAM_BRANCH}"
 
-          if [ "$UPSTREAM_SHA" = "$FORK_MERGE_BASE" ]; then
-            echo "has_changes=false" >> "$GITHUB_OUTPUT"
-          else
-            echo "has_changes=true" >> "$GITHUB_OUTPUT"
-            COMMIT_COUNT=$(git rev-list --count "$FORK_MERGE_BASE".."$UPSTREAM_SHA")
-            echo "commit_count=$COMMIT_COUNT" >> "$GITHUB_OUTPUT"
-          fi
+          BASE_REF="origin/${BASE_BRANCH}"
+          UPSTREAM_REF="upstream/${UPSTREAM_BRANCH}"
+          UPSTREAM_SHA="$(git rev-parse "${UPSTREAM_REF}")"
+          MERGE_BASE="$(git merge-base "${BASE_REF}" "${UPSTREAM_REF}")"
+          UPSTREAM_SHORT="$(git rev-parse --short "${UPSTREAM_REF}")"
+          SYNC_BRANCH="upstream-sync/${UPSTREAM_SHORT}"
+          HEAD_REF="${GITHUB_REPOSITORY_OWNER}:${SYNC_BRANCH}"
 
-      - name: Generate diff
-        if: steps.check-changes.outputs.has_changes == 'true'
-        id: diff
-        run: |
-          MERGE_BASE=${{ steps.check-changes.outputs.merge_base }}
-          UPSTREAM=${{ steps.check-changes.outputs.upstream_sha }}
+          echo "upstream_sha=${UPSTREAM_SHA}" >> "${GITHUB_OUTPUT}"
+          echo "merge_base=${MERGE_BASE}" >> "${GITHUB_OUTPUT}"
+          echo "upstream_short=${UPSTREAM_SHORT}" >> "${GITHUB_OUTPUT}"
+          echo "sync_branch=${SYNC_BRANCH}" >> "${GITHUB_OUTPUT}"
 
-          git diff "$MERGE_BASE".."$UPSTREAM" > /tmp/upstream.diff
-
-          DIFF_SIZE=$(wc -c < /tmp/upstream.diff)
-          if [ "$DIFF_SIZE" -gt 200000 ]; then
-            head -c 200000 /tmp/upstream.diff > /tmp/upstream-truncated.diff
-            echo "[TRUNCATED: diff was $DIFF_SIZE bytes, showing first 200KB]" >> /tmp/upstream-truncated.diff
-            mv /tmp/upstream-truncated.diff /tmp/upstream.diff
-          fi
-
-          DIFF_STAT=$(git diff --stat "$MERGE_BASE".."$UPSTREAM")
-          echo "diff_stat<<EOF" >> "$GITHUB_OUTPUT"
-          echo "$DIFF_STAT" >> "$GITHUB_OUTPUT"
-          echo "EOF" >> "$GITHUB_OUTPUT"
-
-          COMMIT_LOG=$(git log --oneline "$MERGE_BASE".."$UPSTREAM")
-          echo "commit_log<<EOF" >> "$GITHUB_OUTPUT"
-          echo "$COMMIT_LOG" >> "$GITHUB_OUTPUT"
-          echo "EOF" >> "$GITHUB_OUTPUT"
-
-          CHANGED_FILES=$(git diff --name-only "$MERGE_BASE".."$UPSTREAM")
-          echo "changed_files<<EOF" >> "$GITHUB_OUTPUT"
-          echo "$CHANGED_FILES" >> "$GITHUB_OUTPUT"
-          echo "EOF" >> "$GITHUB_OUTPUT"
-
-      - name: Setup Node.js
-        if: steps.check-changes.outputs.has_changes == 'true'
-        uses: actions/setup-node@v4
-        with:
-          node-version: lts/*
-
-      - name: Claude security assessment
-        if: steps.check-changes.outputs.has_changes == 'true'
-        uses: anthropics/claude-code-action@v1
-        with:
-          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
-          github_token: ${{ secrets.GH_PAT }}
-          prompt: |
-            You are reviewing upstream changes from exa-labs/exa-mcp-server before
-            they are merged into a private fork.
-
-            ## Context
-            - Repository: exa-mcp-server (MCP server for Exa web search API)
-            - Upstream commits since last sync: ${{ steps.check-changes.outputs.commit_count }}
-
-            ## Commit log
-            ${{ steps.diff.outputs.commit_log }}
-
-            ## Changed files
-            ${{ steps.diff.outputs.changed_files }}
-
-            ## Instructions
-
-            1. Read the diff at /tmp/upstream.diff
-            2. Run `npm audit` in the repo root and review the output
-            3. Analyze everything for:
-
-            ### Security Issues
-            - New or changed dependencies (package.json, package-lock.json)
-            - Suspicious code patterns (eval, exec, dynamic imports from URLs)
-            - Credential or secret exposure
-            - Network requests to unexpected endpoints
-            - File system access changes
-            - Any vulnerabilities reported by npm audit
-
-            ### Supply Chain Risks
-            - Modified build scripts, CI workflows, or Dockerfile
-            - Dependency tampering (unexpected version changes, new postinstall scripts)
-            - Changes to .npmignore or .gitignore
-            - New binaries or compiled artifacts
-
-            ### Stability Concerns
-            - Breaking API changes (removed exports, changed function signatures)
-            - Major refactors that change core behavior
-            - Removed or renamed tools/capabilities
-            - TypeScript type changes that break compatibility
-
-            4. Write your assessment as JSON to /tmp/verdict.json with this exact schema:
-            {
-              "verdict": "safe" or "risky",
-              "confidence": 0.0 to 1.0,
-              "summary": "one-line summary of findings",
-              "security_issues": [{"severity": "critical|high|medium|low", "description": "...", "file": "..."}],
-              "supply_chain_risks": [{"severity": "critical|high|medium|low", "description": "...", "file": "..."}],
-              "stability_concerns": [{"severity": "critical|high|medium|low", "description": "...", "file": "..."}],
-              "recommendation": "what the maintainer should do"
-            }
-
-            Be conservative: when in doubt, mark as risky. Empty arrays are fine
-            when no issues are found in a category.
-          claude_args: '--model claude-sonnet-4-5-20250929 --allowedTools "Read,Write,Bash(cat:*),Bash(wc:*),Bash(head:*),Bash(tail:*),Bash(grep:*),Bash(npm audit:*)"'
-
-      - name: Parse assessment
-        if: steps.check-changes.outputs.has_changes == 'true'
-        id: assessment
-        run: |
-          if [ ! -f /tmp/verdict.json ]; then
-            echo "verdict=error" >> "$GITHUB_OUTPUT"
-            echo "summary=Claude did not produce a verdict file" >> "$GITHUB_OUTPUT"
-            {
-              echo "report<<EOF"
-              echo "## Security Assessment"
-              echo ""
-              echo "> **Warning:** Claude did not produce a verdict file. Review these changes manually."
-              echo "EOF"
-            } >> "$GITHUB_OUTPUT"
+          if [ "${UPSTREAM_SHA}" = "${MERGE_BASE}" ]; then
+            echo "has_changes=false" >> "${GITHUB_OUTPUT}"
+            echo "has_existing_pr=false" >> "${GITHUB_OUTPUT}"
             exit 0
           fi
 
-          VERDICT=$(jq -r '.verdict' /tmp/verdict.json)
-          CONFIDENCE=$(jq -r '.confidence' /tmp/verdict.json)
-          SUMMARY=$(jq -r '.summary' /tmp/verdict.json)
-          RECOMMENDATION=$(jq -r '.recommendation' /tmp/verdict.json)
+          COMMIT_COUNT="$(git rev-list --count "${MERGE_BASE}..${UPSTREAM_SHA}")"
+          EXISTING_PR_URL="$(gh pr list --repo "${REPO}" --state open --head "${HEAD_REF}" --json url --jq '.[0].url // ""')"
 
-          SECURITY_COUNT=$(jq '.security_issues | length' /tmp/verdict.json)
-          SUPPLY_CHAIN_COUNT=$(jq '.supply_chain_risks | length' /tmp/verdict.json)
-          STABILITY_COUNT=$(jq '.stability_concerns | length' /tmp/verdict.json)
+          git diff --stat "${MERGE_BASE}..${UPSTREAM_SHA}" > /tmp/upstream-diff-stat.txt
+          git log --oneline "${MERGE_BASE}..${UPSTREAM_SHA}" > /tmp/upstream-commit-log.txt
+          git diff --name-only "${MERGE_BASE}..${UPSTREAM_SHA}" > /tmp/upstream-changed-files.txt
 
-          echo "verdict=$VERDICT" >> "$GITHUB_OUTPUT"
-          echo "confidence=$CONFIDENCE" >> "$GITHUB_OUTPUT"
-          echo "summary=$SUMMARY" >> "$GITHUB_OUTPUT"
+          echo "has_changes=true" >> "${GITHUB_OUTPUT}"
+          echo "commit_count=${COMMIT_COUNT}" >> "${GITHUB_OUTPUT}"
 
-          if [ "$VERDICT" = "risky" ]; then
-            EMOJI="🚨"
+          if [ -n "${EXISTING_PR_URL}" ]; then
+            echo "has_existing_pr=true" >> "${GITHUB_OUTPUT}"
+            echo "existing_pr_url=${EXISTING_PR_URL}" >> "${GITHUB_OUTPUT}"
           else
-            EMOJI="✅"
+            echo "has_existing_pr=false" >> "${GITHUB_OUTPUT}"
+            echo "existing_pr_url=" >> "${GITHUB_OUTPUT}"
           fi
 
-          {
-            echo "report<<EOF"
-            echo "## Security Assessment"
-            echo ""
-            echo "$EMOJI **Verdict:** $VERDICT (confidence: $CONFIDENCE)"
-            echo ""
-            echo "### Summary"
-            echo "$SUMMARY"
-            echo ""
-            if [ "$SECURITY_COUNT" -gt 0 ]; then
-              echo "### Security Issues ($SECURITY_COUNT)"
-              jq -r '.security_issues[] | "- **\(.severity)**: \(.description)" + if .file then " (\(.file))" else "" end' /tmp/verdict.json
-              echo ""
-            fi
-            if [ "$SUPPLY_CHAIN_COUNT" -gt 0 ]; then
-              echo "### Supply Chain Risks ($SUPPLY_CHAIN_COUNT)"
-              jq -r '.supply_chain_risks[] | "- **\(.severity)**: \(.description)" + if .file then " (\(.file))" else "" end' /tmp/verdict.json
-              echo ""
-            fi
-            if [ "$STABILITY_COUNT" -gt 0 ]; then
-              echo "### Stability Concerns ($STABILITY_COUNT)"
-              jq -r '.stability_concerns[] | "- **\(.severity)**: \(.description)" + if .file then " (\(.file))" else "" end' /tmp/verdict.json
-              echo ""
-            fi
-            echo "### Recommendation"
-            echo "$RECOMMENDATION"
-            echo ""
-            echo "---"
-            echo ""
-            echo "<details><summary>Diff summary</summary>"
-            echo ""
-            echo '```'
-            echo "${{ steps.diff.outputs.diff_stat }}"
-            echo '```'
-            echo "</details>"
-            echo "EOF"
-          } >> "$GITHUB_OUTPUT"
+      - name: Setup Node.js
+        if: steps.prepare.outputs.has_changes == 'true' && steps.prepare.outputs.has_existing_pr != 'true'
+        uses: actions/setup-node@v6
+        with:
+          node-version: lts/*
 
-      - name: Attempt merge
-        if: steps.check-changes.outputs.has_changes == 'true'
+      - name: Prepare sync branch
+        if: steps.prepare.outputs.has_changes == 'true' && steps.prepare.outputs.has_existing_pr != 'true'
         id: merge
         run: |
-          UPSTREAM_SHORT=$(git rev-parse --short upstream/main)
-          BRANCH="upstream-sync/$(date +%Y-%m-%d)-${UPSTREAM_SHORT}"
+          set -euo pipefail
+
+          BRANCH="${{ steps.prepare.outputs.sync_branch }}"
           git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git checkout -b "$BRANCH"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git switch -C "${BRANCH}" "origin/${BASE_BRANCH}"
 
-          if git merge upstream/main --no-edit; then
-            echo "merge_success=true" >> "$GITHUB_OUTPUT"
-            echo "branch=$BRANCH" >> "$GITHUB_OUTPUT"
-            git push origin "$BRANCH"
+          if git merge "upstream/${UPSTREAM_BRANCH}" --no-ff --no-edit; then
+            echo "merge_state=clean" >> "${GITHUB_OUTPUT}"
           else
-            echo "merge_success=false" >> "$GITHUB_OUTPUT"
-            CONFLICTS=$(git diff --name-only --diff-filter=U)
-            echo "conflicts<<EOF" >> "$GITHUB_OUTPUT"
-            echo "$CONFLICTS" >> "$GITHUB_OUTPUT"
-            echo "EOF" >> "$GITHUB_OUTPUT"
-            git merge --abort
+            echo "merge_state=conflicted" >> "${GITHUB_OUTPUT}"
           fi
 
-      - name: Create sync PR
-        if: steps.merge.outputs.merge_success == 'true'
-        id: create-pr
-        env:
-          GH_TOKEN: ${{ secrets.GH_PAT }}
-          REPORT: ${{ steps.assessment.outputs.report }}
-          COMMIT_COUNT: ${{ steps.check-changes.outputs.commit_count }}
-          COMMIT_LOG: ${{ steps.diff.outputs.commit_log }}
-          VERDICT: ${{ steps.assessment.outputs.verdict }}
-          BRANCH: ${{ steps.merge.outputs.branch }}
+          echo "branch=${BRANCH}" >> "${GITHUB_OUTPUT}"
+
+      - name: Claude review and conflict resolution
+        if: steps.prepare.outputs.has_changes == 'true' && steps.prepare.outputs.has_existing_pr != 'true'
+        uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          github_token: ${{ github.token }}
+          prompt: |
+            You are maintaining the fork `${{ github.repository }}` of `${{ env.UPSTREAM_REPO }}`.
+
+            The checked-out branch is `${{ steps.merge.outputs.branch }}`.
+            It was created from `origin/${{ env.BASE_BRANCH }}` and then merged with `upstream/${{ env.UPSTREAM_BRANCH }}`.
+            Current merge state: `${{ steps.merge.outputs.merge_state }}`.
+
+            Tasks:
+            1. Review the upstream changes for security, supply-chain, and stability concerns.
+            2. If the merge state is `conflicted`, resolve every git conflict and finish the merge with a commit.
+            3. Preserve fork-specific automation and workflow behavior unless upstream clearly supersedes it.
+            4. If you make follow-up code changes beyond the merge resolution, commit them.
+            5. Write a concise markdown report to `/tmp/upstream-review.md` with these sections:
+               - `## Summary`
+               - `## Risks`
+               - `## Testing`
+               - `## Notes`
+
+            Constraints:
+            - Do not open a pull request.
+            - Do not push any branch.
+            - Leave the git worktree clean when you are done.
+
+            Context:
+            - Upstream SHA: `${{ steps.prepare.outputs.upstream_sha }}`
+            - Upstream commits: `${{ steps.prepare.outputs.commit_count }}`
+            - Commit log: `/tmp/upstream-commit-log.txt`
+            - Changed files: `/tmp/upstream-changed-files.txt`
+            - Diff stat: `/tmp/upstream-diff-stat.txt`
+
+            If validation is useful, prefer the lightest relevant commands for this TypeScript repository.
+          claude_args: |
+            --max-turns 20
+            --model claude-sonnet-4-5-20250929
+            --allowedTools "Read,Write,Edit,Bash(git:*),Bash(npm:*),Bash(npx tsc:*)"
+
+      - name: Finalize sync branch
+        if: steps.prepare.outputs.has_changes == 'true' && steps.prepare.outputs.has_existing_pr != 'true'
+        id: finalize
         run: |
-          {
-            echo "$REPORT"
-            echo ""
-            echo "## Upstream Changes"
-            echo ""
-            echo "**Commits:** $COMMIT_COUNT"
-            echo ""
-            echo "<details><summary>Commit log</summary>"
-            echo ""
-            echo '```'
-            echo "$COMMIT_LOG"
-            echo '```'
-            echo ""
-            echo "</details>"
-          } > /tmp/pr-body.md
+          set -euo pipefail
 
-          TITLE="chore: sync with upstream exa-labs/exa-mcp-server"
-          if [ "$VERDICT" = "risky" ]; then
-            TITLE="⚠️ $TITLE"
+          BRANCH="${{ steps.merge.outputs.branch }}"
+
+          if git ls-files -u | grep -q .; then
+            echo "Unresolved merge conflicts remain on ${BRANCH}" >&2
+            exit 1
           fi
 
-          gh pr create \
-            --base main \
-            --head "$BRANCH" \
-            --title "$TITLE" \
-            --body-file /tmp/pr-body.md
+          if ! git diff --quiet || ! git diff --cached --quiet; then
+            git status --short
+            echo "The worktree is dirty. Commit any remaining changes before finishing." >&2
+            exit 1
+          fi
 
-          PR_URL=$(gh pr view "$BRANCH" --json url -q .url)
-          echo "pr_url=$PR_URL" >> "$GITHUB_OUTPUT"
+          if [ "$(git rev-parse HEAD)" = "$(git rev-parse "origin/${BASE_BRANCH}")" ]; then
+            echo "Sync branch does not contain upstream changes." >&2
+            exit 1
+          fi
 
-      # --- Notifications ---
+          git push --force-with-lease origin "HEAD:${BRANCH}"
+          echo "branch=${BRANCH}" >> "${GITHUB_OUTPUT}"
+
+      - name: Create or update sync PR
+        if: steps.prepare.outputs.has_changes == 'true' && steps.prepare.outputs.has_existing_pr != 'true'
+        id: pr
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+
+          BRANCH="${{ steps.finalize.outputs.branch }}"
+          TITLE="chore: sync upstream ${{ env.UPSTREAM_REPO }}@${{ steps.prepare.outputs.upstream_short }}"
+          BODY_FILE="$(mktemp)"
+
+          {
+            echo "## Upstream Sync"
+            echo
+            echo "- Upstream: \`${{ env.UPSTREAM_REPO }}@${{ steps.prepare.outputs.upstream_sha }}\`"
+            echo "- Commits: ${{ steps.prepare.outputs.commit_count }}"
+            echo "- Branch: \`${BRANCH}\`"
+            echo
+            if [ -f /tmp/upstream-review.md ]; then
+              cat /tmp/upstream-review.md
+            else
+              echo "## Summary"
+              echo
+              echo "Automated upstream sync completed without an agent-authored report."
+            fi
+            echo
+            echo "<details><summary>Commit log</summary>"
+            echo
+            echo '```text'
+            cat /tmp/upstream-commit-log.txt
+            echo '```'
+            echo
+            echo "</details>"
+            echo
+            echo "<details><summary>Diff stat</summary>"
+            echo
+            echo '```text'
+            cat /tmp/upstream-diff-stat.txt
+            echo '```'
+            echo
+            echo "</details>"
+          } > "${BODY_FILE}"
+
+          PR_URL="$(gh pr list --repo "${REPO}" --state open --head "${GITHUB_REPOSITORY_OWNER}:${BRANCH}" --json url --jq '.[0].url // ""')"
+
+          if [ -n "${PR_URL}" ]; then
+            gh pr edit "${PR_URL}" --repo "${REPO}" --title "${TITLE}" --body-file "${BODY_FILE}"
+          else
+            PR_URL="$(gh pr create --repo "${REPO}" --base "${BASE_BRANCH}" --head "${BRANCH}" --title "${TITLE}" --body-file "${BODY_FILE}")"
+          fi
+
+          echo "pr_url=${PR_URL}" >> "${GITHUB_OUTPUT}"
 
       - name: Notify -- no changes
-        if: steps.check-changes.outputs.has_changes == 'false'
+        if: steps.prepare.outputs.has_changes == 'false'
         uses: kabilan108/actions/discord-notify@v1
         with:
           webhook-url: ${{ secrets.DISCORD_WEBHOOK }}
           level: info
           title: No upstream changes
-          description: exa-labs/exa-mcp-server main is already in sync.
+          description: ${{ env.UPSTREAM_REPO }} is already in sync.
 
-      - name: Notify -- PR created
-        if: steps.create-pr.outputs.pr_url != ''
+      - name: Notify -- sync PR already open
+        if: steps.prepare.outputs.has_existing_pr == 'true'
         uses: kabilan108/actions/discord-notify@v1
         with:
           webhook-url: ${{ secrets.DISCORD_WEBHOOK }}
-          level: ${{ steps.assessment.outputs.verdict == 'risky' && 'warning' || 'success' }}
-          title: "Upstream sync PR created (${{ steps.assessment.outputs.verdict }})"
+          level: info
+          title: Upstream sync PR already open
           description: |
-            ${{ steps.check-changes.outputs.commit_count }} commits from upstream (verdict: ${{ steps.assessment.outputs.verdict }}, confidence: ${{ steps.assessment.outputs.confidence }}).
-            ${{ steps.assessment.outputs.summary }}
-            PR: ${{ steps.create-pr.outputs.pr_url }}
+            Existing PR: ${{ steps.prepare.outputs.existing_pr_url }}
+            Branch: ${{ steps.prepare.outputs.sync_branch }}
 
-      - name: Notify -- merge conflicts
-        if: steps.merge.outputs.merge_success == 'false'
+      - name: Notify -- PR ready
+        if: steps.pr.outputs.pr_url != ''
         uses: kabilan108/actions/discord-notify@v1
         with:
           webhook-url: ${{ secrets.DISCORD_WEBHOOK }}
-          level: warning
-          title: Merge conflicts need manual resolution
+          level: success
+          title: Upstream sync PR ready
           description: |
-            ${{ steps.check-changes.outputs.commit_count }} upstream commits cannot be auto-merged.
-            Conflicting files: ${{ steps.merge.outputs.conflicts }}
+            ${{ steps.prepare.outputs.commit_count }} upstream commits prepared on ${{ steps.finalize.outputs.branch }}.
+            PR: ${{ steps.pr.outputs.pr_url }}
 
       - name: Notify -- workflow failure
         if: failure()
