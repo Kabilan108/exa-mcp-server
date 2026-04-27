@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { Exa } from "exa-js";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { API_CONFIG } from "./config.js";
+import { API_CONFIG, integrationHeaders } from "./config.js";
 import { ExaAdvancedSearchRequest, ExaSearchResponse } from "../types.js";
 import { createRequestLogger } from "../utils/logger.js";
 import { retryWithBackoff, formatToolError } from "../utils/errorHandler.js";
@@ -19,7 +19,7 @@ Returns: Search results with optional highlights, summaries, and subpage content
     {
       query: z.string().describe("Search query - can be a question, statement, or keywords"),
       numResults: z.coerce.number().optional().describe("Number of results (must be a number, 1-100, default: 10)"),
-      type: z.enum(['auto', 'fast', 'neural']).optional().describe("Search type - 'auto': balanced (default), 'fast': quick results, 'neural': semantic search"),
+      type: z.enum(['auto', 'fast', 'instant']).optional().describe("Search type - 'auto': high quality and works with all filters (recommended), 'fast': quick results, 'instant': fastest results"),
 
       category: z.enum(['company', 'research paper', 'news', 'pdf', 'github', 'personal site', 'people', 'financial report']).optional().describe("Filter results to a specific category"),
 
@@ -61,6 +61,7 @@ Returns: Search results with optional highlights, summaries, and subpage content
     {
       readOnlyHint: true,
       destructiveHint: false,
+      openWorldHint: false,
       idempotentHint: true
     },
     async (params) => {
@@ -166,7 +167,7 @@ Returns: Search results with optional highlights, summaries, and subpage content
           'POST',
           searchRequest,
           undefined,
-          { 'x-exa-integration': 'web-search-advanced-mcp' }
+          integrationHeaders('web-search-advanced-mcp', config)
         ));
 
         checkpoint('exa_advanced_search_response_received');
